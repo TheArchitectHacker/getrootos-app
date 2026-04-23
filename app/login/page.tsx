@@ -36,8 +36,8 @@ export default function LoginPage() {
       <Image 
         src="/rootos-logo.png" 
         alt="RootOS" 
-        width={80} 
-        height={80} 
+        width={160} // HIER VERGROOT
+        height={160} // HIER VERGROOT
         className="mb-10 opacity-60 grayscale hover:grayscale-0 transition-all duration-700" 
       />
       <form onSubmit={handleLogin} className="w-full max-w-xs space-y-4">
