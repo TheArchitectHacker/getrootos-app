@@ -1,28 +1,6 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-:root {
-  --background: #000000;
-  --foreground: #a1a1aa;
-}
+@import "tailwindcss";
 
 body {
-  background-color: var(--background);
-  color: var(--foreground);
-  overflow-x: hidden;
-}
-
-/* Custom Scrollbar voor de Hacker vibe */
-::-webkit-scrollbar {
-  width: 5px;
-}
-::-webkit-scrollbar-track {
-  background: #000;
-}
-::-webkit-scrollbar-thumb {
-  background: #18181b;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #27272a;
+  background-color: black;
+  color: #d4d4d8; /* De terminal-grijze tekst */
 }
