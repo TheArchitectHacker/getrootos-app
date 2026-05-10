@@ -1,13 +1,8 @@
-// app/archive/[slug]/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { createBrowserClient } from "@supabase/ssr";
 import { useParams, useRouter } from "next/navigation";
-
-// CONTROLLED SCARCITY METRICS
-const NODES_ACTIVE = 87; 
-const NODES_TOTAL = 100;
 
 export default function ArchiveNode() {
   const { slug } = useParams();
@@ -18,210 +13,248 @@ export default function ArchiveNode() {
   );
 
   const [chapter, setChapter] = useState<any>(null);
+  const [displayedText, setDisplayedText] = useState("");
+  const [isTypingComplete, setIsTypingComplete] = useState(false);
   const [input, setInput] = useState("");
   const [isInjectingFounder, setIsInjectingFounder] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [isNavigating, setIsNavigating] = useState(false);
+  const [systemReady, setSystemReady] = useState(false);
+  
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const typingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // SECURITY: Voorkom kopiëren en rechtermuisklik
+  useEffect(() => {
+    const preventDefault = (e: Event) => e.preventDefault();
+    document.addEventListener("contextmenu", preventDefault);
+    document.addEventListener("copy", preventDefault);
+    return () => {
+      document.removeEventListener("contextmenu", preventDefault);
+      document.removeEventListener("copy", preventDefault);
+    };
+  }, []);
+
+  const loadNode = useCallback(async () => {
+    if (!slug) return;
+    setLoading(true);
+    
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { router.push("/login"); return; }
+
+    const [chaptersReq, logsReq] = await Promise.all([
+      supabase.from("chapters").select("*").order("order_index", { ascending: true }),
+      supabase.from("user_logs").select("chapter_slug").eq("user_id", user.id)
+    ]);
+
+    const allChapters = chaptersReq.data || [];
+    const completedSlugs = logsReq.data?.map(l => l.chapter_slug) || [];
+    const currentChapter = allChapters.find(c => c.slug === slug);
+
+    if (!currentChapter) { setLoading(false); return; }
+
+    const currentIndex = currentChapter.order_index;
+    if (currentIndex > 0) {
+      const prev = allChapters.find(c => c.order_index === currentIndex - 1);
+      if (prev && !completedSlugs.includes(prev.slug)) {
+        router.push(`/archive/${prev.slug}`);
+        return;
+      }
+    }
+
+    const { data: fullLogs } = await supabase.from("user_logs").select("variable_key, variable_value").eq("user_id", user.id);
+    let content = currentChapter.content;
+    fullLogs?.forEach((log) => {
+      if (log.variable_value) {
+        content = content.replaceAll(`{{${log.variable_key}}}`, log.variable_value);
+      }
+    });
+
+    setChapter({ ...currentChapter, content });
+    setDisplayedText(""); 
+    setIsTypingComplete(false);
+    setLoading(false);
+  }, [slug, supabase, router]);
+
+  useEffect(() => { loadNode(); }, [loadNode]);
 
   useEffect(() => {
-    async function loadNode() {
-      setLoading(true);
-      
-      // 1. Haal de node-content op
-      const { data: ch } = await supabase
-        .from("chapters")
-        .select("*")
-        .eq("slug", slug)
-        .single();
+    if (!chapter || loading || !systemReady || isInjectingFounder) return;
 
-      // 2. Haal de opgeslagen variabelen van de user op (Dynamic Recall)
-      const { data: { user } } = await supabase.auth.getUser();
-      const { data: logs } = await supabase
-        .from("user_logs")
-        .select("variable_key, variable_value")
-        .eq("user_id", user?.id);
+    const audio = new Audio(`/audio/${slug}.mp3`);
+    audioRef.current = audio;
 
-      if (ch) {
-        let parsedContent = ch.content;
+    const startSequence = () => {
+      audio.onloadedmetadata = () => {
+        const audioDurationMs = audio.duration * 1000;
+        const totalChars = chapter.content.length;
+        const safetyBuffer = 3000; 
+        const typingSpeed = Math.max((audioDurationMs - safetyBuffer) / totalChars, 30);
+
+        let index = 0;
+        const fullText = chapter.content;
         
-        // Vervang {{variable_key}} door de echte waarde uit de database
-        logs?.forEach((log) => {
-          if (log.variable_value) {
-            parsedContent = parsedContent.replaceAll(`{{${log.variable_key}}}`, log.variable_value);
+        typingIntervalRef.current = setInterval(() => {
+          setDisplayedText(fullText.slice(0, index + 1));
+          index++;
+          if (index >= fullText.length) {
+            if (typingIntervalRef.current) clearInterval(typingIntervalRef.current);
+            setIsTypingComplete(true);
           }
-        });
+        }, typingSpeed);
 
-        setChapter({ ...ch, content: parsedContent });
+        audio.play().catch(() => setIsTypingComplete(true));
+      };
+      audio.onerror = () => setIsTypingComplete(true);
+    };
+
+    startSequence();
+
+    return () => {
+      if (typingIntervalRef.current) clearInterval(typingIntervalRef.current);
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
       }
-      setLoading(false);
-    }
-
-    if (slug) loadNode();
-  }, [slug, supabase]);
-
-  const handleExecute = async () => {
-    setError("");
-
-    // Validatie: Architecten nemen geen shortcuts
-    if (input.trim().length < 20 && slug !== "00_compliance") {
-      setError("> ERROR: INSUFFICIENT_DATA_STRING. MIN_LENGTH: 20_CHARS.");
-      return;
-    }
-
-    // Specifieke logica voor Protocol 00: De Founder Node Interstitial
-    if (slug === "00_compliance" && input.toUpperCase() === "I_ACCEPT_FULL_ACCOUNTABILITY") {
-      setIsInjectingFounder(true);
-      return; 
-    }
-
-    await proceedToNext();
-  };
+    };
+  }, [chapter, loading, slug, isInjectingFounder, systemReady]);
 
   const proceedToNext = async () => {
+    if (isNavigating) return;
+    setIsNavigating(true);
+
     const { data: { user } } = await supabase.auth.getUser();
-    
-    if (!user) {
-      setError("> ERROR: SESSION_EXPIRED. RE-AUTHENTICATE.");
-      return;
-    }
+    if (!user) return;
 
-    // Log de data naar de database voor later gebruik (The Mirror Effect)
-    if (chapter?.interactive_elements?.command) {
-      await supabase.from("user_logs").insert({
-        user_id: user.id,
-        chapter_slug: slug,
-        variable_key: chapter.interactive_elements.command,
-        variable_value: input
-      });
-    }
+    await supabase.from("user_logs").upsert({
+      user_id: user.id,
+      chapter_slug: slug,
+      variable_key: chapter?.interactive_elements?.command || 'status',
+      variable_value: input || "ACCEPTED"
+    });
 
-    // Routeer naar de volgende fase
-    if (slug === '07_total_override') {
+    if (slug === '07-1-integration') {
+      router.push('/archive/dossier');
+    } else if (slug === '09-1-final-activation') {
       router.push('/deploy');
     } else {
-      const { data: next } = await supabase
-        .from("chapters")
+      const { data: next } = await supabase.from("chapters")
         .select("slug")
-        .eq("order_index", chapter.order_index + 1)
+        .gt("order_index", chapter.order_index)
+        .order("order_index", { ascending: true })
+        .limit(1)
         .single();
         
       if (next) {
+        setChapter(null);
+        setIsInjectingFounder(false);
+        setDisplayedText("");
+        setInput("");
+        setIsTypingComplete(false);
         router.push(`/archive/${next.slug}`);
+        setTimeout(() => setIsNavigating(false), 800);
       } else {
         router.push('/dashboard');
       }
     }
   };
 
-  if (loading) return <div className="min-h-screen bg-black flex items-center justify-center font-mono text-red-900 animate-pulse uppercase tracking-[1em]">Loading_Node...</div>;
-  if (!chapter) return <div className="min-h-screen bg-black text-white p-10 font-mono italic uppercase text-xs">Node_Not_Found: 404</div>;
+  const handleExecute = async () => {
+    setError("");
+    const interaction = chapter?.interactive_elements;
+    if (!interaction) { await proceedToNext(); return; }
+    
+    const cleanInput = input.trim().toUpperCase();
+
+    if (interaction.type === "required_input") {
+      const expected = interaction.expected_response.toUpperCase();
+      if (cleanInput !== expected && cleanInput !== expected.replaceAll("_", " ")) {
+        setError(`> ERROR: INVALID_COMMAND.`);
+        return;
+      }
+      if (slug === "00-compliance") {
+        setIsInjectingFounder(true);
+        return;
+      }
+    }
+
+    if (interaction.type === "data_collection" && input.trim().length < 2) {
+      setError("> ERROR: DATA_STREAM_TOO_WEAK.");
+      return;
+    }
+
+    await proceedToNext();
+  };
+
+  if (!systemReady && !loading) {
+    return (
+      <div className="min-h-screen bg-black flex items-center justify-center p-6">
+        <button onClick={() => setSystemReady(true)} className="border-2 border-red-900 px-12 py-8 text-red-600 font-mono text-[11px] tracking-[0.5em] uppercase hover:bg-red-900 hover:text-white transition-all shadow-[0_0_30px_rgba(153,27,27,0.2)]">
+          &gt; INITIALIZE_SYSTEM_INTERFACE
+        </button>
+      </div>
+    );
+  }
+
+  if (loading && !isInjectingFounder) {
+    return <div className="min-h-screen bg-black flex items-center justify-center font-mono text-red-900 uppercase tracking-[0.5em] animate-pulse">Accessing_Archive...</div>;
+  }
 
   return (
-    <main className="min-h-screen bg-black text-zinc-400 p-6 md:p-12 font-mono relative overflow-hidden">
-      
-      {/* PERSISTENT FOUNDER COUNTER - SCARCITY ILLUSION */}
-      <div className="fixed top-8 right-8 flex flex-col items-end z-50 pointer-events-none">
-        <div className="flex items-center gap-3 bg-zinc-950/90 border border-red-900/30 p-4 backdrop-blur-md shadow-[0_0_40px_rgba(153,27,27,0.2)]">
-          <span className="w-2 h-2 bg-red-600 rounded-full animate-pulse shadow-[0_0_12px_#dc2626]"></span>
-          <p className="text-[11px] text-zinc-500 font-black uppercase tracking-[0.4em]">
-            NODES_ACTIVE: <span className="text-white font-mono">{NODES_ACTIVE}/{NODES_TOTAL}</span>
-          </p>
-        </div>
-        <p className="text-[9px] text-red-900 font-black uppercase mt-3 tracking-[0.3em] animate-pulse">
-          &gt; SYSTEM_CAPACITY_CRITICAL
-        </p>
-      </div>
-
-      <div className="max-w-3xl mx-auto pt-24 pb-32 relative z-10">
-        
-        {/* INTERSTITIAL: FOUNDER STATUS INJECTION */}
+    <main className="min-h-screen bg-black text-zinc-400 p-6 md:p-12 font-mono relative overflow-hidden select-none">
+      <div className="max-w-3xl mx-auto pt-20 pb-40 relative z-10">
         {isInjectingFounder ? (
-          <div className="space-y-10 animate-in fade-in slide-in-from-bottom-8 duration-1000">
-            <div className="border-2 border-red-900 bg-red-950/10 p-10 space-y-8 relative overflow-hidden">
-              <div className="absolute top-0 right-0 p-4 opacity-10">
-                <p className="text-6xl font-black italic">SEC_00</p>
-              </div>
-
-              <div className="space-y-2">
-                <p className="text-red-600 font-black text-xs tracking-[0.5em] animate-pulse uppercase">&gt; SCANNING NODE STATUS...</p>
-                <p className="text-red-700 font-black text-xs tracking-[0.5em] uppercase">&gt; STATUS: NEW_RECRUIT</p>
-              </div>
-              
-              <div className="space-y-6 text-zinc-200 text-sm leading-relaxed uppercase tracking-widest font-bold">
-                <p>ATTENTION: Je bent gearriveerd tijdens de <span className="text-red-600 underline">INITIAL_BOOT_PHASE</span> van RootOS.</p>
-                <p>Er zijn momenteel <span className="text-white border border-white px-2">[{NODES_ACTIVE}/{NODES_TOTAL}]</span> FOUNDER_NODE slots beschikbaar.</p>
-                
-                <div className="bg-zinc-900/50 p-6 border-l-4 border-red-900">
-                  <p className="text-xs text-zinc-400">
-                    Architects die het systeem betreden tijdens deze fase krijgen de permanente status <span className="text-red-600 font-black">[ FOUNDER ]</span>. 
-                    Dit geeft je in de toekomst voorrang bij systeem-updates, exclusieve toegang tot legacy-files en een levenslange &apos;Locked-In&apos; rate voor de Full Deployment.
-                  </p>
-                </div>
-                
-                <p className="text-zinc-500">Zodra slot #100 is gevuld, wordt het systeem gesloten voor publieke toegang.</p>
-              </div>
-
-              <div className="pt-6 border-t border-red-900/40">
-                <p className="text-red-600 font-black text-[10px] mb-8 tracking-[0.3em] uppercase animate-pulse">STATUS: FOUNDER_STATUS_PENDING...</p>
-                <button 
-                  onClick={proceedToNext}
-                  className="w-full bg-red-900 text-white py-6 text-xs font-black uppercase tracking-[0.6em] hover:bg-red-700 transition-all shadow-[0_0_30px_rgba(153,27,27,0.3)] active:scale-95"
-                >
-                  Claim_Founder_Slot_&_Continue
-                </button>
-              </div>
-            </div>
+          <div className="border-2 border-red-900 bg-red-950/10 p-10 space-y-8 animate-in zoom-in-95 duration-700 shadow-[0_0_50px_rgba(153,27,27,0.2)]">
+             <div className="space-y-2">
+                <p className="text-red-600 font-black text-[10px] tracking-[0.5em] animate-pulse uppercase">&gt; STATUS: IDENTITY_VERIFIED</p>
+                <h2 className="text-white text-3xl font-black uppercase tracking-tighter italic">Founder_Node_Detected</h2>
+             </div>
+             <div className="space-y-6 text-zinc-300 text-sm uppercase leading-relaxed tracking-widest font-bold border-y border-red-900/30 py-8">
+                <p>You have obtained access to the <span className="text-red-600 underline">INITIAL_BOOT_PHASE</span> of RootOS.</p>
+                <p>By proceeding, you claim one of the few remaining slots. Your identity will be permanently flagged as <span className="text-white bg-red-900 px-2 ml-1">FOUNDER</span>.</p>
+             </div>
+             <button onClick={proceedToNext} className="w-full bg-red-900 text-white py-6 text-[11px] font-black uppercase tracking-[0.6em] hover:bg-red-700 transition-all">
+               C O N F I R M _ S T A T U S
+             </button>
           </div>
         ) : (
-          /* STANDARD PROTOCOL INTERFACE */
           <div className="space-y-12">
-             <header className="flex items-center gap-6">
-                <div className="h-px w-16 bg-red-900"></div>
-                <h1 className="text-red-700 text-xs uppercase tracking-[0.6em] font-black italic">{chapter.title}</h1>
-             </header>
-
-            <div className="text-zinc-200 text-base md:text-lg leading-relaxed mb-16 whitespace-pre-wrap border-l border-zinc-900 pl-10 py-4 font-medium uppercase tracking-wide">
-              {chapter.content}
-            </div>
-
-            <div className="space-y-8 bg-zinc-950/40 p-10 border border-zinc-900 backdrop-blur-sm relative overflow-hidden group">
-              <div className="absolute top-0 left-0 w-full h-1 bg-linear-to-r from-transparent via-red-900/50 to-transparent"></div>
-              
-              <div className="flex justify-between items-center">
-                <p className="text-[11px] text-zinc-600 uppercase font-black tracking-[0.4em] italic">{chapter.interactive_elements.prompt}</p>
-                <span className="text-[9px] text-red-950 font-black uppercase tracking-tighter">Secure_Line_Active</span>
+            <header className="flex items-center gap-6">
+              <div className="h-px w-16 bg-red-900"></div>
+              <h1 className="text-red-700 text-[10px] uppercase tracking-[0.6em] font-black italic">{chapter?.title}</h1>
+            </header>
+            <div className="border-l border-zinc-900 pl-8 py-2">
+              <div className="text-zinc-200 text-base md:text-lg leading-relaxed whitespace-pre-wrap font-medium uppercase tracking-wide">
+                {displayedText}
+                {!isTypingComplete && <span className="inline-block w-2 h-5 bg-red-600 animate-pulse ml-2"></span>}
               </div>
-
-              <textarea 
-                className="w-full bg-black border border-zinc-900 p-6 text-white uppercase text-xs focus:border-red-900 outline-none transition-all placeholder:opacity-20 font-mono"
-                rows={5}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="&gt; Awaiting_Architect_Input..."
-              />
-              
-              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
-                <button 
-                  onClick={handleExecute} 
-                  className="bg-red-950/20 text-red-500 border border-red-900 px-12 py-5 text-[11px] font-black hover:bg-red-900 hover:text-white transition-all uppercase tracking-[0.5em] active:scale-95 shadow-xl"
-                >
-                  Execute_Command
-                </button>
-                {error && (
-                  <p className="text-red-600 text-[10px] font-black animate-pulse tracking-widest uppercase italic">
-                    {error}
-                  </p>
-                )}
-              </div>
+              {isTypingComplete && (
+                <div className="mt-12 space-y-8 animate-in fade-in duration-1000">
+                  <div className="space-y-4">
+                    <p className="text-[10px] text-zinc-600 uppercase font-black tracking-[0.4em] italic">{chapter?.interactive_elements?.prompt}</p>
+                    <textarea 
+                      className="w-full bg-transparent border-none p-0 text-white uppercase text-base md:text-lg focus:ring-0 outline-none transition-all font-mono resize-none placeholder:text-zinc-800 tracking-wide"
+                      rows={3}
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                      placeholder="> Awaiting_Architect_Response..."
+                      autoFocus
+                    />
+                  </div>
+                  <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
+                    <button onClick={handleExecute} className="bg-red-950/20 text-red-500 border border-red-900 px-12 py-5 text-[11px] font-black hover:bg-red-900 hover:text-white transition-all uppercase tracking-[0.5em]">
+                      Execute_Command
+                    </button>
+                    {error && <p className="text-red-600 text-[10px] font-black animate-pulse tracking-widest uppercase italic">{error}</p>}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
       </div>
-
-      {/* FOOTER DECORATION */}
-      <footer className="fixed bottom-8 left-8 pointer-events-none opacity-20">
-        <p className="text-[9px] font-black uppercase tracking-[1em] text-zinc-800">RootOS_Terminal_v4.0.1</p>
-      </footer>
+      <div className="fixed inset-0 pointer-events-none bg-size-[40px_40px] bg-[linear-gradient(to_right,#0f0f0f_1px,transparent_1px),linear-gradient(to_bottom,#0f0f0f_1px,transparent_1px)] opacity-20" />
     </main>
   );
 }
