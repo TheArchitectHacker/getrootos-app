@@ -1,4 +1,3 @@
-// app/archive/[slug]/page.tsx
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
@@ -24,7 +23,6 @@ export default function ArchiveNode() {
   const [systemReady, setSystemReady] = useState(false);
   const [isProcessingAI, setIsProcessingAI] = useState(false);
 
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const typingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const hasStartedTypewriter = useRef(false);
 
@@ -44,136 +42,77 @@ export default function ArchiveNode() {
   }, []);
 
   const loadNode = useCallback(async () => {
-    if (!slug) {
-      console.log("> DIAGNOSTIC: No slug present in URL.");
-      return;
-    }
+    if (!slug) return;
     setLoading(true);
     setError("");
 
     try {
-      console.log("> DIAGNOSTIC: 1. Initializing loadNode for slug:", slug);
-      
       const { data: { user }, error: authError } = await supabase.auth.getUser();
-      if (authError) console.error("> DIAGNOSTIC: Auth session exception:", authError);
-      
-      console.log("> DIAGNOSTIC: 2. Supabase auth checked. User ID:", user?.id || "NO_ACTIVE_USER");
-      
-      if (!user) { 
-        console.log("> DIAGNOSTIC: 2b. Session unauthorized. Enforcing redirect to /login.");
-        router.push("/login"); 
-        return; 
-      }
+      if (authError || !user) { router.push("/login"); return; }
 
-      console.log("> DIAGNOSTIC: 3. Fetching architectural modules and operator progress...");
       const [modulesReq, progressReq] = await Promise.all([
         supabase.from("archive_modules").select("*").eq("is_active", true).order("order_index", { ascending: true }),
         supabase.from("operator_archive_progress").select("module_id, status").eq("user_id", user.id)
       ]);
 
-      console.log("> DIAGNOSTIC: 4. Core database pipeline received data streams.");
-      console.log("> DIAGNOSTIC: -> Modules count:", modulesReq.data?.length || 0, "Query Error:", modulesReq.error || "None");
-      console.log("> DIAGNOSTIC: -> Progress count:", progressReq.data?.length || 0, "Query Error:", progressReq.error || "None");
-
       const allModules = modulesReq.data || [];
       const progressList = progressReq.data || [];
       const currentModule = allModules.find(m => m.slug === slug);
 
-      if (!currentModule) { 
-        console.log("> DIAGNOSTIC: CRITICAL - Target slug does not match any records in archive_modules!");
-        setLoading(false); 
-        return; 
-      }
+      if (!currentModule) { setLoading(false); return; }
 
-      console.log("> DIAGNOSTIC: 5. Target module locked:", currentModule.title);
-
+      // Check integriteit vorige node
       const currentIndex = currentModule.order_index;
       if (currentIndex > 1) {
         const prevModule = allModules.find(m => m.order_index === currentIndex - 1);
         const prevProgress = progressList.find(p => p.module_id === prevModule?.id);
-        console.log("> DIAGNOSTIC: 5b. Preceding node integrity check:", prevModule?.slug, "Status:", prevProgress?.status || "NO_STATUS");
-
         if (!prevProgress || prevProgress.status !== "PURGED") {
-          console.log("> DIAGNOSTIC: 5c. Preceding node unpurged. Falling back to:", prevModule?.slug);
-          if (prevModule) {
-            router.push(`/archive/${prevModule.slug}`);
-            return;
-          }
+          if (prevModule) { router.push(`/archive/${prevModule.slug}`); return; }
         }
       }
 
       const currentProgress = progressList.find(p => p.module_id === currentModule.id);
       if (!currentProgress || currentProgress.status === "LOCKED") {
-        console.log("> DIAGNOSTIC: 6. Status is LOCKED or uninitialized. Escalating to UNLOCKED...");
-        const { error: upsertError } = await supabase.from("operator_archive_progress").upsert({
+        await supabase.from("operator_archive_progress").upsert({
           user_id: user.id,
           module_id: currentModule.id,
           status: "UNLOCKED",
           unlocked_at: new Date().toISOString()
         }, { onConflict: "user_id,module_id" });
-        
-        if (upsertError) console.error("> DIAGNOSTIC: Upsert transaction exception:", upsertError);
       }
 
-      console.log("> DIAGNOSTIC: 7. Data streams stabilized. Synchronizing dynamic content layout.");
-      setModuleData({ ...currentModule, prompt: currentModule.prompt });
-
+      setModuleData(currentModule);
     } catch (err) {
-      console.error("> DIAGNOSTIC: CRITICAL CORE EXCEPTION IN LOADNODE:", err);
       setError("> SYSTEM ERROR: FAILED_TO_STABILIZE_DATA_STREAM.");
     } finally {
-      console.log("> DIAGNOSTIC: 8. Pipeline loading complete. Transitioning loading state to false.");
       setLoading(false);
     }
   }, [slug, supabase, router]);
 
   useEffect(() => {
-    loadNode(); 
-    return () => {
-      hasStartedTypewriter.current = false;
-    };
+    loadNode();
+    return () => { hasStartedTypewriter.current = false; };
   }, [loadNode]);
 
   // UNBREAKABLE TYPEWRITER ENGINE
   useEffect(() => {
-    if (!moduleData || loading || !systemReady || isInjectingFounder || hasStartedTypewriter.current) {
-      console.log("> DIAGNOSTIC TYPEWRITER BLOCKERS:", { 
-        hasModuleData: !!moduleData, 
-        isLoading: loading, 
-        isSystemReady: systemReady, 
-        isInjectingFounder, 
-        hasStartedTypewriter: hasStartedTypewriter.current 
-      });
-      return;
-    }
-
-    console.log("> DIAGNOSTIC: 9. Executing Typewriter deployment sequence.");
+    if (!moduleData || loading || !systemReady || isInjectingFounder || hasStartedTypewriter.current) return;
+    
     hasStartedTypewriter.current = true;
     const textToType = moduleData.prompt || "NO_DATA_STREAM_FOUND";
     
-    const startTypewriterEffect = () => {
-      if (typingIntervalRef.current) clearInterval(typingIntervalRef.current);
+    let index = 0;
+    setDisplayedText("");
+    typingIntervalRef.current = setInterval(() => {
+      setDisplayedText((prev) => prev + textToType.charAt(index));
+      index++;
+      if (index >= textToType.length) {
+        if (typingIntervalRef.current) clearInterval(typingIntervalRef.current);
+        setIsTypingComplete(true);
+      }
+    }, 20);
 
-      let index = 0;
-      setDisplayedText("");
-      console.log("> DIAGNOSTIC: 10. Streaming output buffer. Character payload size:", textToType.length);
-
-      typingIntervalRef.current = setInterval(() => {
-        setDisplayedText(textToType.slice(0, index + 1));
-        index++;
-        if (index >= textToType.length) {
-          if (typingIntervalRef.current) clearInterval(typingIntervalRef.current);
-          console.log("> DIAGNOSTIC: 11. Typewriter data pipeline successfully completed.");
-          setIsTypingComplete(true);
-        }
-      }, 20);
-    };
-
-    startTypewriterEffect();
-
-    return () => {
-      if (typingIntervalRef.current) clearInterval(typingIntervalRef.current);
-    };
+    return () => { if (typingIntervalRef.current) clearInterval(typingIntervalRef.current); };
   }, [moduleData, loading, systemReady, isInjectingFounder]);
 
   const proceedToNext = async () => {
@@ -211,7 +150,6 @@ export default function ArchiveNode() {
         router.push('/archive/dossier');
       }
     } catch (err) {
-      console.error("> ROUTING_EXCEPTION:", err);
       setIsNavigating(false);
     }
   };
@@ -219,7 +157,6 @@ export default function ArchiveNode() {
   const handleExecute = async () => {
     if (isProcessingAI || !input.trim()) return;
     setError("");
-    
     const cleanInput = input.trim();
 
     if (cleanInput.length < 15) {
@@ -232,39 +169,29 @@ export default function ArchiveNode() {
 
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { setIsProcessingAI(false); return; }
-
-      const { data, error: functionError } = await supabase.functions.invoke("bullshit-filter", {
-        body: { input: cleanInput, slug: slug, userId: user.id, moduleId: moduleData.id }
+      const response = await fetch("https://iszwpqsgnividdcxvrce.supabase.co/functions/v1/bullshit-filter", {
+        method: "POST",
+        headers: { 
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`
+        },
+        body: JSON.stringify({ input: cleanInput, slug, userId: user?.id, moduleId: moduleData.id })
       });
 
-      if (functionError || !data) throw new Error("Firewall block.");
-
+      const data = await response.json();
       if (!data.approved) {
         setError(`> CASSIUS_REJECTION: ${data.reason}`);
         setIsProcessingAI(false);
         return;
       }
 
-      await supabase.from("archive_logs").insert({
-        user_id: user.id,
-        module_id: moduleData.id,
-        user_input: cleanInput,
-        sincerity_score: data.sincerity_score || 10,
-        cassius_response: data.reason || "PROCESSED",
-        status: data.isJailbreak ? "JAILBREAK_ATTEMPT" : "PROCESSED"
-      });
-
       setIsProcessingAI(false);
-      
       if (slug === "01-the-9-5-loop" && !isInjectingFounder) {
         setIsInjectingFounder(true);
       } else {
         await proceedToNext();
       }
-
     } catch (err) {
-      console.error("> FIREWALL_EXCEPTION:", err);
       setError("> ERROR: FIREWALL_TIMEOUT. CONNECTION TO CASSIUS LOST.");
       setIsProcessingAI(false);
     }
@@ -275,10 +202,7 @@ export default function ArchiveNode() {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center p-6">
         <button
-          onClick={() => {
-            console.log("> DIAGNOSTIC: Interface initialization triggered. systemReady updated to true.");
-            setSystemReady(true);
-          }}
+          onClick={() => setSystemReady(true)}
           className="border-2 border-red-900 px-12 py-8 text-red-600 font-mono text-[11px] tracking-[0.5em] uppercase hover:bg-red-900 hover:text-white transition-all shadow-[0_0_30px_rgba(153,27,27,0.2)]"
         >
           &gt; INITIALIZE_SYSTEM_INTERFACE
